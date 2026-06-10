@@ -1,0 +1,119 @@
+# ==============================================================================
+# Global compose — all three services in one file
+# ==============================================================================
+#
+# Usage:
+#   # Start ASR + TTS (default, no playground):
+#   docker compose up -d
+#
+#   # Start everything including playground:
+#   docker compose --profile playground up -d
+#
+#   # Stop everything:
+#   docker compose down
+#
+# Override defaults via environment or .env file:
+#   IMAGE_PREFIX=...  IMAGE_TAG=...
+#   ASR_MODEL_ID=...  ASR_HOST_PORT=...
+#   TTS_MODEL_BASE=... TTS_HOST_PORT=... TTS_UI_HOST_PORT=...
+#   PLAYGROUND_HOST_PORT=... TTS_BASE_URL=...
+# ==============================================================================
+
+services:
+  # ──────────────────────────────────────────────────────────────────────────
+  # ASR — Speech-to-text (always starts)
+  # ──────────────────────────────────────────────────────────────────────────
+  qwen3-asr:
+    image: ${IMAGE_PREFIX:-ghcr.io/cjlapao}/qwen3-asr-gb10:${IMAGE_TAG:-latest}
+    container_name: qwen3-asr
+    ports:
+      - "${ASR_HOST_PORT:-8004}:8000"
+    environment:
+      - MODEL_ID=${ASR_MODEL_ID:-Qwen/Qwen3-ASR-1.7B}
+      - HF_HOME=/models
+    volumes:
+      - ./models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - { driver: nvidia, count: all, capabilities: [gpu] }
+    ipc: host
+    ulimits: { memlock: -1, stack: 67108864 }
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/v1/models"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 240s
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # TTS — Text-to-speech API (always starts)
+  # ──────────────────────────────────────────────────────────────────────────
+  qwen3-tts:
+    image: ${IMAGE_PREFIX:-ghcr.io/cjlapao}/qwen3-tts-gb10:${IMAGE_TAG:-latest}
+    container_name: qwen3-tts
+    ports:
+      - "${TTS_HOST_PORT:-8005}:8000"
+    environment:
+      - HF_HOME=/models
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+      - CUDA_VISIBLE_DEVICES=0
+      - VOICES_ROOT=/app/voices
+      - MODEL_BASE=${TTS_MODEL_BASE:-Qwen/Qwen3-TTS-12Hz-0.6B-Base}
+      - MODEL_CUSTOM=${TTS_MODEL_CUSTOM:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}
+      - MODEL_DESIGN=${TTS_MODEL_DESIGN:-Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign}
+    volumes:
+      - ./models:/models
+      - ./qwen3-tts/voices:/app/voices
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/docs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
+    restart: unless-stopped
+    logging:
+      driver: syslog
+      options:
+        tag: "qwen3-tts"
+        syslog-facility: "local6"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Voice Playground — Gradio UI (opt-in via --profile playground)
+  # ──────────────────────────────────────────────────────────────────────────
+  voice-playground:
+    profiles: ["playground"]
+    image: ${IMAGE_PREFIX:-ghcr.io/cjlapao}/voice-playground:${IMAGE_TAG:-latest}
+    container_name: voice-playground
+    depends_on:
+      qwen3-tts:
+        condition: service_healthy
+    ports:
+      - "${PLAYGROUND_HOST_PORT:-8006}:7860"
+    environment:
+      - TTS_BASE=${TTS_BASE_URL:-http://qwen3-tts:8000}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7860/').close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    logging:
+      driver: syslog
+      options:
+        tag: "voice-playground"
+        syslog-facility: "local6"
